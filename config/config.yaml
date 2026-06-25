@@ -1,0 +1,22 @@
+camera_subscriber:
+  ros__parameters:
+    # Color image topic
+    color_image_topic: /color/image_raw
+
+    # Color camera info topic
+    color_info_topic: /color/camera_info
+
+    # Aligned depth image topic
+    aligned_depth_image_topic: /aligned_depth_to_color/image_raw
+
+    # Aligned depth camera info topic
+    aligned_depth_info_topic: /aligned_depth_to_color/camera_info
+
+    # Subscription queue size
+    queue_size: 10
+
+    # Save received images for debug verification
+    save_debug_images: true
+    save_dir: ./
+    save_once: true
+    save_depth_preview: true
