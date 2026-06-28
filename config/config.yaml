@@ -20,3 +20,34 @@ camera_subscriber:
     save_dir: ./
     save_once: true
     save_depth_preview: true
+
+    # Grasp pose estimation runs on demand through a service, not per frame.
+    enable_grasp_pose: true
+    grasp_pose_service: /estimate_grasp_pose
+    publish_grasp_result: false
+    save_grasp_debug_image: true
+    grasp_debug_image_name: grasp_pose_overlay.png
+    grasp_pose_topic: /grasp/pose
+    grasp_width_topic: /grasp/width
+    grasp_debug_image_topic: /grasp/debug_image
+    grasp_frame_id: ''
+
+    # Empty sam3_model_dir resolves to share/grasp_vision_pkg/models/sam3.
+    sam3_model_dir: ''
+    sam3_prompt_type: text
+    sam3_prompt: visual
+    sam3_box_prompt: [0.0, 0.0, 0.0, 0.0]
+    sam3_provider: CUDAExecutionProvider,CPUExecutionProvider
+    sam3_input_width: 1008
+    sam3_input_height: 1008
+    sam3_score_threshold: 0.0
+
+    # GraspPoseEstimator parameters
+    depth_scale: 0.001
+    float_depth_scale: 1.0
+    min_depth: 0.05
+    max_depth: 3.0
+    min_points: 80
+    max_points: 20000
+    outlier_percentile: 95.0
+    grasp_width_margin: 0.02

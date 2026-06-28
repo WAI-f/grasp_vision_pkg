@@ -3,17 +3,26 @@
 <package format="3">
   <name>grasp_vision_pkg</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>RGB-D grasp vision node with SAM3 ONNX segmentation.</description>
   <maintainer email="15071194757@163.com">root</maintainer>
   <license>TODO: License declaration</license>
 
-  <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
-  <depend>cv_bridge</depend>
-  <depend>python3-numpy</depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <build_depend>ament_cmake_python</build_depend>
+  <build_depend>robot_interface_pkg</build_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>robot_interface_pkg</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
@@ -21,6 +30,6 @@
   <test_depend>python3-pytest</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

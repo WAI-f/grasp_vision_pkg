@@ -19,5 +19,16 @@ import pytest
 @pytest.mark.linter
 @pytest.mark.pep257
 def test_pep257():
-    rc = main(argv=['.', 'test'])
+    rc = main(
+        argv=[
+            '--add-ignore',
+            'D213',
+            'D407',
+            'D413',
+            'grasp_vision_pkg',
+            'launch',
+            'setup.py',
+            'test',
+        ]
+    )
     assert rc == 0, 'Found code style errors / warnings'

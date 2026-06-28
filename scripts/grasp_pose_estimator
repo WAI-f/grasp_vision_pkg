@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from grasp_vision_pkg.grasp_pose_estimator import main
+
+
+if __name__ == '__main__':
+    main()

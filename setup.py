@@ -29,6 +29,8 @@ setup(
     entry_points={
         'console_scripts': [
             'camera_subscriber = grasp_vision_pkg.camera_subscriber:main',
+            'grasp_pose_estimator = grasp_vision_pkg.grasp_pose_estimator:main',
+            'sam3_onnx_segmenter = grasp_vision_pkg.sam3_onnx_segmenter:main',
         ],
     },
 )

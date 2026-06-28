@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from grasp_vision_pkg.sam3_onnx_segmenter import main
+
+
+if __name__ == '__main__':
+    main()
