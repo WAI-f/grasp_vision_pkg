@@ -1,20 +1,23 @@
 """ROS2 camera subscriber with service-based SAM3 grasp pose estimation."""
 
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 import time
 
 from ament_index_python.packages import get_package_share_directory
 import cv2
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Vector3
 from grasp_vision_pkg.grasp_pose_estimator import GraspPoseEstimator
 from grasp_vision_pkg.sam3_onnx_segmenter import SAM3OnnxSegmenter
 import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Float32
 
 
@@ -36,8 +39,10 @@ class CameraSubscriber(Node):
         self.saved_grasp_debug_image = False
         self.color_info_logged = False
         self.aligned_depth_info_logged = False
+        self.sam3_segmenter = None
         self.grasp_estimator = None
         self.grasp_estimator_error = ''
+        self.grasp_estimator_lock = RLock()
 
         self.declare_parameters(
             namespace='',
@@ -52,6 +57,7 @@ class CameraSubscriber(Node):
                 ('save_once', True),
                 ('save_depth_preview', True),
                 ('enable_grasp_pose', True),
+                ('preload_grasp_estimator', True),
                 ('grasp_pose_service', '/estimate_grasp_pose'),
                 ('publish_grasp_result', False),
                 ('save_grasp_debug_image', True),
@@ -59,6 +65,18 @@ class CameraSubscriber(Node):
                 ('grasp_pose_topic', '/grasp/pose'),
                 ('grasp_width_topic', '/grasp/width'),
                 ('grasp_debug_image_topic', '/grasp/debug_image'),
+                ('publish_segmented_clouds', True),
+                ('republish_segmented_clouds', True),
+                ('segmented_cloud_republish_rate', 1.0),
+                ('refresh_segmented_cloud_stamp', True),
+                ('object_cloud_topic', '/grasp/object_cloud'),
+                ('background_cloud_topic', '/grasp/background_cloud'),
+                ('segmented_cloud_stride', 2),
+                ('background_mask_dilation_px', 5),
+                ('background_object_bbox_filter', True),
+                ('background_object_bbox_padding_xy', 0.06),
+                ('background_object_bbox_padding_z', 0.04),
+                ('min_object_dimension', 0.01),
                 ('grasp_frame_id', ''),
                 ('sam3_model_dir', ''),
                 ('sam3_prompt_type', 'text'),
@@ -93,6 +111,9 @@ class CameraSubscriber(Node):
         self.save_once = bool(self.get_parameter('save_once').value)
         self.save_depth_preview = bool(self.get_parameter('save_depth_preview').value)
         self.enable_grasp_pose = bool(self.get_parameter('enable_grasp_pose').value)
+        self.preload_grasp_estimator = bool(
+            self.get_parameter('preload_grasp_estimator').value
+        )
         self.publish_grasp_result = bool(
             self.get_parameter('publish_grasp_result').value
         )
@@ -115,6 +136,43 @@ class CameraSubscriber(Node):
             grasp_debug_image_topic = self.get_parameter(
                 'grasp_debug_image_topic'
             ).value
+            object_cloud_topic = self.get_parameter('object_cloud_topic').value
+            background_cloud_topic = self.get_parameter(
+                'background_cloud_topic'
+            ).value
+            self.publish_segmented_clouds = bool(
+                self.get_parameter('publish_segmented_clouds').value
+            )
+            self.republish_segmented_clouds = bool(
+                self.get_parameter('republish_segmented_clouds').value
+            )
+            self.segmented_cloud_republish_rate = max(
+                0.0,
+                float(self.get_parameter('segmented_cloud_republish_rate').value),
+            )
+            self.refresh_segmented_cloud_stamp = bool(
+                self.get_parameter('refresh_segmented_cloud_stamp').value
+            )
+            self.segmented_cloud_stride = max(
+                1, int(self.get_parameter('segmented_cloud_stride').value)
+            )
+            self.background_mask_dilation_px = max(
+                0, int(self.get_parameter('background_mask_dilation_px').value)
+            )
+            self.background_object_bbox_filter = bool(
+                self.get_parameter('background_object_bbox_filter').value
+            )
+            self.background_object_bbox_padding_xy = max(
+                0.0,
+                float(self.get_parameter('background_object_bbox_padding_xy').value),
+            )
+            self.background_object_bbox_padding_z = max(
+                0.0,
+                float(self.get_parameter('background_object_bbox_padding_z').value),
+            )
+            self.min_object_dimension = max(
+                0.001, float(self.get_parameter('min_object_dimension').value)
+            )
             grasp_pose_service = self.get_parameter('grasp_pose_service').value
             self.grasp_pose_pub = self.create_publisher(
                 PoseStamped,
@@ -131,24 +189,66 @@ class CameraSubscriber(Node):
                 grasp_debug_image_topic,
                 queue_size,
             )
+            object_cloud_qos = QoSProfile(depth=queue_size)
+            object_cloud_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+            self.object_cloud_pub = self.create_publisher(
+                PointCloud2,
+                object_cloud_topic,
+                object_cloud_qos,
+            )
+            background_cloud_qos = QoSProfile(depth=queue_size)
+            background_cloud_qos.durability = DurabilityPolicy.VOLATILE
+            self.background_cloud_pub = self.create_publisher(
+                PointCloud2,
+                background_cloud_topic,
+                background_cloud_qos,
+            )
             estimate_grasp_pose_srv = self._load_estimate_grasp_pose_service()
             self.grasp_pose_srv = self.create_service(
                 estimate_grasp_pose_srv,
                 grasp_pose_service,
                 self.estimate_grasp_pose_callback,
             )
+            self.latest_object_cloud_msg = None
+            self.latest_background_cloud_msg = None
+            self.segmented_cloud_republish_timer = None
+            if (
+                self.republish_segmented_clouds
+                and self.segmented_cloud_republish_rate > 0.0
+            ):
+                self.segmented_cloud_republish_timer = self.create_timer(
+                    1.0 / self.segmented_cloud_republish_rate,
+                    self._republish_segmented_clouds,
+                )
             self.get_logger().info(
                 'Grasp pose service enabled with '
                 f'service={grasp_pose_service}, '
                 f'pose_topic={grasp_pose_topic}, '
                 f'width_topic={grasp_width_topic}, '
-                f'debug_image_topic={grasp_debug_image_topic}'
+                f'debug_image_topic={grasp_debug_image_topic}, '
+                f'object_cloud_topic={object_cloud_topic}, '
+                f'background_cloud_topic={background_cloud_topic}'
             )
         else:
             self.grasp_pose_pub = None
             self.grasp_width_pub = None
             self.grasp_debug_image_pub = None
+            self.object_cloud_pub = None
+            self.background_cloud_pub = None
             self.grasp_pose_srv = None
+            self.publish_segmented_clouds = False
+            self.republish_segmented_clouds = False
+            self.segmented_cloud_republish_rate = 0.0
+            self.refresh_segmented_cloud_stamp = False
+            self.segmented_cloud_republish_timer = None
+            self.latest_object_cloud_msg = None
+            self.latest_background_cloud_msg = None
+            self.segmented_cloud_stride = 1
+            self.background_mask_dilation_px = 0
+            self.background_object_bbox_filter = False
+            self.background_object_bbox_padding_xy = 0.0
+            self.background_object_bbox_padding_z = 0.0
+            self.min_object_dimension = 0.01
 
         self.color_image_sub = self.create_subscription(
             Image,
@@ -184,6 +284,12 @@ class CameraSubscriber(Node):
             f'queue_size={queue_size}'
         )
 
+        if self.enable_grasp_pose and self.preload_grasp_estimator:
+            self.get_logger().info(
+                'Preloading grasp pose estimator and SAM3 ONNX models once.'
+            )
+            self._ensure_grasp_estimator()
+
     def _load_estimate_grasp_pose_service(self):
         try:
             from robot_interface_pkg.srv import EstimateGraspPose
@@ -197,13 +303,17 @@ class CameraSubscriber(Node):
             raise RuntimeError(message) from exc
         return EstimateGraspPose
 
-    def _create_grasp_estimator(self):
+    def _create_sam3_segmenter(self):
         model_dir = self._resolve_sam3_model_dir()
         providers = self._split_csv_parameter(
             self.get_parameter('sam3_provider').value
         )
         input_width = int(self.get_parameter('sam3_input_width').value)
         input_height = int(self.get_parameter('sam3_input_height').value)
+        self.get_logger().info(
+            'Loading SAM3 ONNX models once from '
+            f'{model_dir} with providers={providers}'
+        )
         segmenter = SAM3OnnxSegmenter(
             model_dir=model_dir,
             providers=providers,
@@ -213,6 +323,17 @@ class CameraSubscriber(Node):
                 self.get_parameter('sam3_score_threshold').value
             ),
         )
+        self.get_logger().info('SAM3 ONNX models loaded and cached for reuse.')
+        return segmenter
+
+    def _ensure_sam3_segmenter(self):
+        with self.grasp_estimator_lock:
+            if self.sam3_segmenter is None:
+                self.sam3_segmenter = self._create_sam3_segmenter()
+            return self.sam3_segmenter
+
+    def _create_grasp_estimator(self):
+        segmenter = self._ensure_sam3_segmenter()
         return GraspPoseEstimator(
             segmenter=segmenter,
             depth_scale=float(self.get_parameter('depth_scale').value),
@@ -230,18 +351,19 @@ class CameraSubscriber(Node):
         )
 
     def _ensure_grasp_estimator(self):
-        if self.grasp_estimator is not None:
-            return True
-        try:
-            self.grasp_estimator = self._create_grasp_estimator()
-            self.grasp_estimator_error = ''
-            return True
-        except Exception as exc:
-            self.grasp_estimator_error = str(exc)
-            self.get_logger().error(
-                f'Failed to initialize grasp pose estimator: {exc}'
-            )
-            return False
+        with self.grasp_estimator_lock:
+            if self.grasp_estimator is not None:
+                return True
+            try:
+                self.grasp_estimator = self._create_grasp_estimator()
+                self.grasp_estimator_error = ''
+                return True
+            except Exception as exc:
+                self.grasp_estimator_error = str(exc)
+                self.get_logger().error(
+                    f'Failed to initialize grasp pose estimator: {exc}'
+                )
+                return False
 
     def _resolve_sam3_model_dir(self):
         raw_model_dir = str(self.get_parameter('sam3_model_dir').value).strip()
@@ -388,11 +510,25 @@ class CameraSubscriber(Node):
         response.status_code = response.STATUS_SUCCESS
         response.message = 'Grasp pose estimated.'
         response.pose = self._pose_to_msg(pose, source_header)
+        object_pose, object_dimensions = self._object_bounds_to_msgs(
+            self.grasp_estimator.last_points,
+            source_header,
+        )
+        response.object_pose = object_pose
+        response.object_dimensions = object_dimensions
         response.width = float(pose.width)
         response.score = float(pose.score)
         response.point_count = int(pose.point_count)
         response.mask_pixel_count = self._last_mask_pixel_count()
         response.segmentation_score = self._last_segmentation_score()
+
+        if self._should_publish_segmented_clouds(request):
+            self._publish_segmented_clouds(
+                color_frame,
+                depth_frame,
+                camera_matrix,
+                source_header,
+            )
 
         if bool(request.publish_result) or self.publish_grasp_result:
             self._publish_grasp_pose_msg(response.pose)
@@ -469,6 +605,271 @@ class CameraSubscriber(Node):
         if prediction is None:
             return float('nan')
         return float(prediction.scores[prediction.selected_index])
+
+    def _object_bounds_to_msgs(self, points, source_header):
+        pose_msg = PoseStamped()
+        self._fill_output_header(pose_msg.header, source_header)
+        pose_msg.pose.orientation.w = 1.0
+
+        dimensions = Vector3()
+        if points is None or len(points) == 0:
+            return pose_msg, dimensions
+
+        point_array = np.asarray(points, dtype=np.float64)
+        mins = np.nanmin(point_array, axis=0)
+        maxs = np.nanmax(point_array, axis=0)
+        center = (mins + maxs) * 0.5
+        size = np.maximum(maxs - mins, float(self.min_object_dimension))
+
+        pose_msg.pose.position.x = float(center[0])
+        pose_msg.pose.position.y = float(center[1])
+        pose_msg.pose.position.z = float(center[2])
+        dimensions.x = float(size[0])
+        dimensions.y = float(size[1])
+        dimensions.z = float(size[2])
+        return pose_msg, dimensions
+
+    def _should_publish_segmented_clouds(self, request):
+        return (
+            (self.publish_segmented_clouds or bool(request.publish_result))
+            and self.object_cloud_pub is not None
+            and self.background_cloud_pub is not None
+        )
+
+    def _publish_segmented_clouds(
+        self,
+        color_frame,
+        depth_frame,
+        camera_matrix,
+        source_header,
+    ):
+        if self.grasp_estimator is None or self.grasp_estimator.last_mask is None:
+            return
+        object_cloud, background_cloud = self._make_segmented_clouds(
+            color_frame,
+            depth_frame,
+            camera_matrix,
+            self.grasp_estimator.last_mask,
+            source_header,
+        )
+        self.latest_object_cloud_msg = deepcopy(object_cloud)
+        self.latest_background_cloud_msg = deepcopy(background_cloud)
+        self.object_cloud_pub.publish(object_cloud)
+        self.background_cloud_pub.publish(background_cloud)
+        self.get_logger().info(
+            'Published segmented point clouds: '
+            f'object_points={object_cloud.width}, '
+            f'background_points={background_cloud.width}'
+        )
+
+    def _make_segmented_clouds(
+        self,
+        color_frame,
+        depth_frame,
+        camera_matrix,
+        object_mask,
+        source_header,
+    ):
+        intrinsics = self.grasp_estimator._normalize_camera_matrix(camera_matrix)
+        depth_m = self.grasp_estimator._depth_to_meters(depth_frame)
+        mask = np.asarray(object_mask).astype(bool)
+        if mask.shape != depth_m.shape:
+            raise ValueError(
+                f'Object mask shape {mask.shape} does not match depth shape '
+                f'{depth_m.shape}'
+            )
+
+        valid = (
+            np.isfinite(depth_m)
+            & (depth_m >= float(self.grasp_estimator.min_depth))
+            & (depth_m <= float(self.grasp_estimator.max_depth))
+        )
+        object_selector = valid & mask
+        background_mask = self._dilate_mask(mask, self.background_mask_dilation_px)
+        object_volume_mask = self._object_bbox_volume_mask(
+            valid,
+            object_selector,
+            depth_m,
+            intrinsics,
+        )
+        background_selector = valid & ~background_mask & ~object_volume_mask
+        header = self._cloud_header(source_header)
+        return (
+            self._selector_to_cloud(
+                object_selector,
+                depth_m,
+                color_frame,
+                intrinsics,
+                header,
+            ),
+            self._selector_to_cloud(
+                background_selector,
+                depth_m,
+                color_frame,
+                intrinsics,
+                header,
+            ),
+        )
+
+    @staticmethod
+    def _dilate_mask(mask, dilation_px):
+        if dilation_px <= 0:
+            return mask
+        kernel_size = dilation_px * 2 + 1
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        return cv2.dilate(mask.astype(np.uint8), kernel).astype(bool)
+
+    def _object_bbox_volume_mask(self, valid, object_selector, depth_m, intrinsics):
+        if not self.background_object_bbox_filter or not object_selector.any():
+            return np.zeros_like(valid, dtype=bool)
+
+        object_points = self._selector_xyz(object_selector, depth_m, intrinsics)
+        if object_points.size == 0:
+            return np.zeros_like(valid, dtype=bool)
+
+        mins = np.nanmin(object_points, axis=0)
+        maxs = np.nanmax(object_points, axis=0)
+        padding = np.array(
+            [
+                self.background_object_bbox_padding_xy,
+                self.background_object_bbox_padding_xy,
+                self.background_object_bbox_padding_z,
+            ],
+            dtype=np.float32,
+        )
+        mins = mins - padding
+        maxs = maxs + padding
+
+        rows, cols = np.nonzero(valid)
+        if rows.size == 0:
+            return np.zeros_like(valid, dtype=bool)
+
+        points = self._pixels_to_xyz(rows, cols, depth_m, intrinsics)
+        inside = np.all((points >= mins) & (points <= maxs), axis=1)
+        volume_mask = np.zeros_like(valid, dtype=bool)
+        volume_mask[rows[inside], cols[inside]] = True
+
+        removed_points = int(np.count_nonzero(volume_mask & ~object_selector))
+        self.get_logger().info(
+            'Background object-volume filter: '
+            f'bounds_min={mins.tolist()}, bounds_max={maxs.tolist()}, '
+            f'removed_background_points={removed_points}'
+        )
+        return volume_mask
+
+    def _selector_xyz(self, selector, depth_m, intrinsics):
+        rows, cols = np.nonzero(selector)
+        if rows.size == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        return self._pixels_to_xyz(rows, cols, depth_m, intrinsics)
+
+    @staticmethod
+    def _pixels_to_xyz(rows, cols, depth_m, intrinsics):
+        z = depth_m[rows, cols].astype(np.float32)
+        fx = intrinsics[0, 0]
+        fy = intrinsics[1, 1]
+        cx = intrinsics[0, 2]
+        cy = intrinsics[1, 2]
+        x = ((cols.astype(np.float32) - cx) / fx) * z
+        y = ((rows.astype(np.float32) - cy) / fy) * z
+        return np.column_stack((x, y, z)).astype(np.float32, copy=False)
+
+    def _cloud_header(self, source_header):
+        if source_header is not None:
+            return deepcopy(source_header)
+        msg = PointCloud2()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        return msg.header
+
+    def _selector_to_cloud(
+        self,
+        selector,
+        depth_m,
+        color_frame,
+        intrinsics,
+        header,
+    ):
+        rows, cols = np.nonzero(selector)
+        stride = int(self.segmented_cloud_stride)
+        if stride > 1 and rows.size > 0:
+            keep = (rows % stride == 0) & (cols % stride == 0)
+            rows = rows[keep]
+            cols = cols[keep]
+
+        msg = PointCloud2()
+        msg.header = deepcopy(header)
+        msg.height = 1
+        msg.is_bigendian = False
+        msg.is_dense = True
+        msg.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.point_step = 16
+
+        if rows.size == 0:
+            msg.width = 0
+            msg.row_step = 0
+            msg.data = b''
+            return msg
+
+        xyz = self._pixels_to_xyz(rows, cols, depth_m, intrinsics)
+        x = xyz[:, 0]
+        y = xyz[:, 1]
+        z = xyz[:, 2]
+
+        colors = color_frame[rows, cols]
+        if colors.ndim == 1:
+            colors = np.repeat(colors[:, None], 3, axis=1)
+        bgr = colors[:, :3].astype(np.uint32)
+        rgb_uint32 = (
+            (bgr[:, 2] << 16)
+            | (bgr[:, 1] << 8)
+            | bgr[:, 0]
+        )
+
+        cloud = np.empty(
+            rows.size,
+            dtype=[
+                ('x', '<f4'),
+                ('y', '<f4'),
+                ('z', '<f4'),
+                ('rgb', '<f4'),
+            ],
+        )
+        cloud['x'] = x
+        cloud['y'] = y
+        cloud['z'] = z
+        cloud['rgb'] = rgb_uint32.view(np.float32)
+
+        msg.width = rows.size
+        msg.row_step = msg.point_step * msg.width
+        msg.data = cloud.tobytes()
+        return msg
+
+    def _republish_segmented_clouds(self):
+        if (
+            self.latest_object_cloud_msg is None
+            or self.latest_background_cloud_msg is None
+            or self.object_cloud_pub is None
+            or self.background_cloud_pub is None
+        ):
+            return
+
+        object_cloud = deepcopy(self.latest_object_cloud_msg)
+        background_cloud = deepcopy(self.latest_background_cloud_msg)
+        if self.refresh_segmented_cloud_stamp:
+            # A zero stamp asks tf2 consumers to use the latest available
+            # transform. This keeps MoveIt OctoMap from dropping these debug
+            # clouds when image stamps fall outside the TF cache.
+            object_cloud.header.stamp.sec = 0
+            object_cloud.header.stamp.nanosec = 0
+            background_cloud.header.stamp.sec = 0
+            background_cloud.header.stamp.nanosec = 0
+        self.object_cloud_pub.publish(object_cloud)
+        self.background_cloud_pub.publish(background_cloud)
 
     def _publish_grasp_pose_msg(self, msg):
         if self.grasp_pose_pub is not None:

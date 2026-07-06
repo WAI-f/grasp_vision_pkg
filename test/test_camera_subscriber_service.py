@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 from grasp_vision_pkg.camera_subscriber import CameraSubscriber
@@ -31,6 +32,8 @@ class _Response:
         self.status_code = 0
         self.message = ''
         self.pose = None
+        self.object_pose = None
+        self.object_dimensions = SimpleNamespace(x=0.0, y=0.0, z=0.0)
         self.width = 0.0
         self.score = 0.0
         self.point_count = 0
@@ -45,6 +48,11 @@ class _Estimator:
     def __init__(self, pose):
         self.pose = pose
         self.last_mask = np.array([[True, False], [True, True]])
+        self.last_points = np.array([
+            [0.08, 0.18, 0.28],
+            [0.12, 0.22, 0.32],
+            [0.10, 0.20, 0.30],
+        ])
         self.segmenter = SimpleNamespace(
             last_prediction=SimpleNamespace(
                 scores=np.array([0.12, 0.87]),
@@ -78,10 +86,21 @@ def _node_without_ros():
     node.latest_color_header = None
     node.latest_aligned_depth_header = None
     node.default_grasp_prompt = 'visual'
+    node.sam3_segmenter = None
     node.grasp_estimator = None
     node.grasp_estimator_error = ''
+    node.grasp_estimator_lock = nullcontext()
     node.publish_grasp_result = False
     node.save_grasp_debug_image = False
+    node.publish_segmented_clouds = False
+    node.object_cloud_pub = None
+    node.background_cloud_pub = None
+    node.segmented_cloud_stride = 1
+    node.background_mask_dilation_px = 0
+    node.background_object_bbox_filter = False
+    node.background_object_bbox_padding_xy = 0.0
+    node.background_object_bbox_padding_z = 0.0
+    node.min_object_dimension = 0.01
     node.grasp_frame_id = ''
     node.get_logger = lambda: _Logger()
     return node
@@ -138,8 +157,93 @@ def test_estimate_grasp_pose_success_response_contains_status_details():
     assert response.status_code == response.STATUS_SUCCESS
     assert response.pose.header.frame_id == 'camera_color'
     assert response.pose.pose.position.z == 0.3
+    assert np.isclose(response.object_pose.pose.position.z, 0.3)
+    assert np.isclose(response.object_dimensions.x, 0.04)
     assert response.width == 0.06
     assert response.score == 0.91
     assert response.point_count == 42
     assert response.mask_pixel_count == 3
     assert response.segmentation_score == 0.87
+
+
+def test_ensure_sam3_segmenter_reuses_cached_instance():
+    node = _node_without_ros()
+    created = []
+
+    def create_segmenter():
+        segmenter = SimpleNamespace(name=f'segmenter-{len(created)}')
+        created.append(segmenter)
+        return segmenter
+
+    node._create_sam3_segmenter = create_segmenter
+
+    first = node._ensure_sam3_segmenter()
+    second = node._ensure_sam3_segmenter()
+
+    assert first is second
+    assert created == [first]
+
+
+def test_ensure_grasp_estimator_reuses_cached_instance():
+    node = _node_without_ros()
+    created = []
+
+    def create_estimator():
+        estimator = SimpleNamespace(name=f'estimator-{len(created)}')
+        created.append(estimator)
+        return estimator
+
+    node._create_grasp_estimator = create_estimator
+
+    assert node._ensure_grasp_estimator()
+    first = node.grasp_estimator
+    assert node._ensure_grasp_estimator()
+
+    assert node.grasp_estimator is first
+    assert created == [first]
+
+
+def test_background_cloud_removes_padded_object_bbox_volume():
+    node = _node_without_ros()
+    node.background_object_bbox_filter = True
+    node.background_object_bbox_padding_xy = 0.2
+    node.background_object_bbox_padding_z = 0.2
+    node.grasp_estimator = SimpleNamespace(
+        min_depth=0.05,
+        max_depth=3.0,
+        _normalize_camera_matrix=lambda matrix: np.asarray(matrix, dtype=np.float64),
+        _depth_to_meters=lambda depth: np.asarray(depth, dtype=np.float32),
+    )
+
+    depth = np.ones((3, 3), dtype=np.float32)
+    color = np.zeros((3, 3, 3), dtype=np.uint8)
+    intrinsics = np.array([
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0],
+    ])
+    mask = np.zeros((3, 3), dtype=bool)
+    mask[1, 1] = True
+
+    object_cloud, background_cloud = node._make_segmented_clouds(
+        color,
+        depth,
+        intrinsics,
+        mask,
+        Header(),
+    )
+
+    assert object_cloud.width == 1
+    assert background_cloud.width == 8
+
+    node.background_object_bbox_padding_xy = 1.1
+    object_cloud, background_cloud = node._make_segmented_clouds(
+        color,
+        depth,
+        intrinsics,
+        mask,
+        Header(),
+    )
+
+    assert object_cloud.width == 1
+    assert background_cloud.width == 0

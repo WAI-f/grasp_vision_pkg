@@ -43,11 +43,42 @@ def test_estimate_from_precomputed_mask():
     assert 0.0 <= pose.score <= 1.0
     assert pose.center_pixel[0] == 80
     assert pose.center_pixel[1] == 60
+    assert np.allclose(pose.orientation_matrix[:, 2], [0.0, 0.0, 1.0])
+    assert np.allclose(
+        pose.orientation_matrix.T @ pose.orientation_matrix,
+        np.eye(3),
+        atol=1e-6,
+    )
+    assert math.isclose(np.linalg.det(pose.orientation_matrix), 1.0, rel_tol=1e-6)
 
     vis = estimator.visualize(rgb, pose, camera_matrix, object_mask=mask)
     assert vis.shape == rgb.shape
     assert vis.dtype == np.uint8
     assert not np.array_equal(vis, rgb)
+
+
+def test_estimate_keeps_pose_z_parallel_to_camera_z_on_sloped_depth():
+    rgb, depth, mask, camera_matrix = _make_test_data()
+    mask_selector = mask.astype(bool)
+    rows, cols = np.indices(depth.shape)
+    depth = np.full(depth.shape, 1.0, dtype=np.float32)
+    depth[mask_selector] = (
+        0.8
+        + (cols[mask_selector] - 80.0) * 0.002
+        + (rows[mask_selector] - 60.0) * 0.001
+    )
+    estimator = GraspPoseEstimator(min_points=20)
+
+    pose = estimator.estimate(
+        rgb,
+        depth,
+        camera_matrix,
+        object_mask=mask,
+    )
+
+    assert np.allclose(pose.orientation_matrix[:, 2], [0.0, 0.0, 1.0])
+    assert np.isclose(pose.orientation_matrix[2, 0], 0.0)
+    assert np.isclose(pose.orientation_matrix[2, 1], 0.0)
 
 
 def test_estimate_rejects_mask_shape_mismatch():

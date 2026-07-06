@@ -23,6 +23,9 @@ camera_subscriber:
 
     # Grasp pose estimation runs on demand through a service, not per frame.
     enable_grasp_pose: true
+    # Load SAM3 ONNX models once during node startup. If false, first service
+    # call lazily loads them once and later calls reuse the same sessions.
+    preload_grasp_estimator: true
     grasp_pose_service: /estimate_grasp_pose
     publish_grasp_result: false
     save_grasp_debug_image: true
@@ -30,6 +33,21 @@ camera_subscriber:
     grasp_pose_topic: /grasp/pose
     grasp_width_topic: /grasp/width
     grasp_debug_image_topic: /grasp/debug_image
+    publish_segmented_clouds: true
+    republish_segmented_clouds: true
+    segmented_cloud_republish_rate: 1.0
+    # true sets republished cloud stamp to 0 so TF consumers use latest transform.
+    refresh_segmented_cloud_stamp: true
+    object_cloud_topic: /grasp/object_cloud
+    background_cloud_topic: /grasp/background_cloud
+    segmented_cloud_stride: 2
+    background_mask_dilation_px: 2
+    # Remove the target object's padded 3D volume from background_cloud so
+    # MoveIt OctoMap does not duplicate the grasped object as environment.
+    background_object_bbox_filter: true
+    background_object_bbox_padding_xy: 0.02
+    background_object_bbox_padding_z: 0.02
+    min_object_dimension: 0.01
     grasp_frame_id: ''
 
     # Empty sam3_model_dir resolves to share/grasp_vision_pkg/models/sam3.

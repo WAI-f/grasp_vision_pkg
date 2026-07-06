@@ -19,7 +19,7 @@ class GraspPose:
 
     ``orientation_matrix`` columns are the gripper frame axes expressed in the
     camera frame: x is the finger closing axis, y is the object long axis, and
-    z points from the object back toward the camera.
+    z is fixed parallel to the camera optical +Z axis.
     """
 
     position: np.ndarray
@@ -239,24 +239,12 @@ class GraspPoseEstimator:
         pixels: np.ndarray,
     ) -> GraspPose:
         center = np.median(points, axis=0)
-        centered = points - center
-        covariance = np.cov(centered, rowvar=False)
-        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        order = np.argsort(eigenvalues)[::-1]
-        eigenvalues = eigenvalues[order]
-        eigenvectors = eigenvectors[:, order]
+        long_axis, closing_axis, eigenvalues = self._estimate_image_plane_axes(
+            points
+        )
+        camera_z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-        long_axis = self._normalize(eigenvectors[:, 0])
-        normal_axis = self._normalize(eigenvectors[:, 2])
-        if normal_axis[2] > 0.0:
-            normal_axis = -normal_axis
-
-        long_axis = long_axis - normal_axis * np.dot(long_axis, normal_axis)
-        long_axis = self._normalize(long_axis)
-        closing_axis = self._normalize(np.cross(long_axis, normal_axis))
-        long_axis = self._normalize(np.cross(normal_axis, closing_axis))
-
-        rotation = np.column_stack((closing_axis, long_axis, normal_axis))
+        rotation = np.column_stack((closing_axis, long_axis, camera_z_axis))
         width = self._estimate_grasp_width(points, center, closing_axis)
         center_pixel = tuple(np.round(np.median(pixels, axis=0)).astype(int))
         score = self._estimate_score(eigenvalues, points.shape[0])
@@ -271,6 +259,33 @@ class GraspPoseEstimator:
             center_pixel=center_pixel,
             point_count=points.shape[0],
         )
+
+    def _estimate_image_plane_axes(
+        self,
+        points: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        xy_points = points[:, :2]
+        xy_center = np.median(xy_points, axis=0)
+        centered_xy = xy_points - xy_center
+        covariance = np.cov(centered_xy, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+
+        long_xy = eigenvectors[:, 0]
+        if long_xy[0] < 0.0 or (
+            np.isclose(long_xy[0], 0.0) and long_xy[1] < 0.0
+        ):
+            long_xy = -long_xy
+
+        long_axis = self._normalize(
+            np.array([long_xy[0], long_xy[1], 0.0], dtype=np.float64)
+        )
+        camera_z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        closing_axis = self._normalize(np.cross(long_axis, camera_z_axis))
+        long_axis = self._normalize(np.cross(camera_z_axis, closing_axis))
+        return long_axis, closing_axis, eigenvalues
 
     def _estimate_grasp_width(
         self,
