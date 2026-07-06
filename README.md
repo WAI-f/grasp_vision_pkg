@@ -35,7 +35,7 @@
   - 订阅 RGB、aligned depth、camera info。
   - 缓存最新 RGB-D 帧和相机内参。
   - 提供 `/estimate_grasp_pose` service。
-  - service 请求到达时才初始化 SAM3 ONNX segmenter 和 `GraspPoseEstimator`。
+  - 默认启动时初始化一次 SAM3 ONNX segmenter 和 `GraspPoseEstimator`，后续 service 请求复用模型会话只做推理。
   - 可选发布抓取位姿、夹爪宽度、debug overlay 图像。
 
 - `sam3_onnx_segmenter.py`
@@ -189,6 +189,7 @@ message='Waiting for color image, aligned depth image, and camera info.'
 | `aligned_depth_image_topic` | `/aligned_depth_to_color/image_raw` | 对齐到彩色相机的深度图 topic。 |
 | `aligned_depth_info_topic` | `/aligned_depth_to_color/camera_info` | 对齐深度相机内参 topic。 |
 | `enable_grasp_pose` | `true` | 是否启用抓取位姿 service。 |
+| `preload_grasp_estimator` | `true` | 是否在节点启动时加载一次 SAM3/估计器；设为 `false` 时首次服务调用懒加载一次，后续复用。 |
 | `grasp_pose_service` | `/estimate_grasp_pose` | service 名称。 |
 | `publish_grasp_result` | `false` | 是否默认发布抓取结果 topic。 |
 | `save_grasp_debug_image` | `true` | 是否默认保存抓取 debug overlay。 |

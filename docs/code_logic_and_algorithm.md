@@ -7,8 +7,8 @@
 1. `camera_subscriber` 订阅 RGB、aligned depth、camera info。
 2. 节点只缓存最新帧，不做实时推理。
 3. client 调用 `/estimate_grasp_pose` service。
-4. service 内部按需初始化 `SAM3OnnxSegmenter`。
-5. SAM3 先做分割，输出一个 object mask。
+4. 节点默认启动时初始化一次 `SAM3OnnxSegmenter` 和 `GraspPoseEstimator`；如果关闭预加载，则首次 service 调用懒加载一次。
+5. 后续 service 请求复用已加载的 SAM3 ONNX sessions，只执行分割推理，输出一个 object mask。
 6. `GraspPoseEstimator` 用 mask + 深度图 + 相机内参估计抓取位姿。
 7. service 返回 `success/status_code/message/pose/width/...`，client 自己决定下一步状态。
 
@@ -25,6 +25,7 @@
 - 订阅图像和相机信息。
 - 保存最近一次 RGB、depth、header、camera matrix。
 - 暴露 ROS2 service：`/estimate_grasp_pose`。
+- 启动时或首次请求时加载一次 SAM3/估计器，并在后续请求中复用。
 - 把请求参数转换成 SAM3 prompt。
 - 把 `GraspPoseEstimator` 的输出封装为 service response。
 - 根据请求或参数选择是否发布 topic、保存 debug 图。
@@ -130,24 +131,24 @@ z = depth
 
 这部分的目的不是精细建模，而是让 PCA 受离群点影响更小。
 
-### 4.3 PCA 位姿估计
+### 4.3 相机平面 PCA 位姿估计
 
-去噪后，对 3D 点做协方差矩阵和特征分解：
+去噪后，只对 3D 点的相机 XY 分量做协方差矩阵和特征分解：
 
-- 最大特征值对应物体最长方向。
-- 最小特征值近似物体法向方向。
+- 最大特征值对应物体在图像平面内的最长方向。
+- 不再使用 3D PCA 的最小特征向量作为物体法向。
 
 然后构造抓取坐标系：
 
-- `normal_axis`：对象朝向相机的法向，若朝向反了就翻转。
-- `long_axis`：物体主长度方向，去掉法向投影后重新归一化。
-- `closing_axis`：由 `long_axis × normal_axis` 得到，表示夹爪闭合轴。
+- `long_axis`：物体在相机 XY 平面内的主长度方向，z 分量固定为 0。
+- `camera_z_axis`：固定为相机坐标系 `[0, 0, 1]`，让抓取位姿 z 轴始终与相机 Z 轴平行。
+- `closing_axis`：由 `long_axis × camera_z_axis` 得到，表示夹爪闭合轴。
 
 最终旋转矩阵列向量是：
 
 - x 轴：`closing_axis`
 - y 轴：`long_axis`
-- z 轴：`normal_axis`
+- z 轴：`camera_z_axis`
 
 ### 4.4 位姿中心、宽度和分数
 
