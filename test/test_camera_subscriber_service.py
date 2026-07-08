@@ -180,6 +180,33 @@ def test_estimate_grasp_pose_success_response_contains_status_details():
     assert response.background_cloud.width == 1
 
 
+def test_estimate_grasp_pose_releases_cached_inference_outputs():
+    pose = GraspPose(
+        position=np.array([0.1, 0.2, 0.3]),
+        orientation_matrix=np.eye(3),
+        quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+        width=0.06,
+        score=0.91,
+        center_pixel=(1, 1),
+        point_count=42,
+    )
+    node = _node_without_ros()
+    node.latest_color_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    node.latest_aligned_depth_frame = np.ones((2, 2), dtype=np.uint16)
+    node.color_camera_matrix = np.eye(3)
+    node.latest_color_header = Header()
+    node.latest_color_header.frame_id = 'camera_color'
+    node.grasp_estimator = _Estimator(pose)
+    node._ensure_grasp_estimator = lambda: True
+
+    response = node._estimate_grasp_pose(_request(), _Response())
+
+    assert response.success
+    assert node.grasp_estimator.last_mask is None
+    assert node.grasp_estimator.last_points is None
+    assert node.grasp_estimator.segmenter.last_prediction is None
+
+
 def test_ensure_sam3_segmenter_reuses_cached_instance():
     node = _node_without_ros()
     created = []

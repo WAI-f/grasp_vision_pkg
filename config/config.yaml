@@ -13,7 +13,7 @@ camera_subscriber:
     aligned_depth_info_topic: /aligned_depth_to_color/camera_info
 
     # Subscription queue size
-    queue_size: 10
+    queue_size: 2
 
     # Save received images for debug verification
     save_debug_images: true
@@ -34,11 +34,11 @@ camera_subscriber:
     grasp_width_topic: /grasp/width
     grasp_debug_image_topic: /grasp/debug_image
     segmented_cloud_stride: 2
-    background_mask_dilation_px: 3
+    background_mask_dilation_px: 5
     # Remove the target object's padded 3D volume from background_cloud so
     # MoveIt OctoMap does not duplicate the grasped object as environment.
     background_object_bbox_filter: true
-    background_object_bbox_padding_xy: 0.04
+    background_object_bbox_padding_xy: 0.06
     background_object_bbox_padding_z: 0.02
     min_object_dimension: 0.01
     grasp_frame_id: ''

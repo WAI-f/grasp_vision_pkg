@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
+import gc
 import time
 
 from ament_index_python.packages import get_package_share_directory
@@ -442,11 +443,13 @@ class CameraSubscriber(Node):
                 object_prompt=prompt,
             )
         except Exception as exc:
-            return self._set_failure(
+            response = self._set_failure(
                 response,
                 response.STATUS_ESTIMATION_FAILED,
                 f'Failed to estimate grasp pose: {exc}',
             )
+            self._release_grasp_inference_cache()
+            return response
 
         response.success = True
         response.status_code = response.STATUS_SUCCESS
@@ -505,6 +508,7 @@ class CameraSubscriber(Node):
             f'score={pose.score:.3f}, '
             f'point_count={pose.point_count}'
         )
+        self._release_grasp_inference_cache()
         return response
 
     def _latest_rgbd_snapshot(self):
@@ -561,6 +565,34 @@ class CameraSubscriber(Node):
         if prediction is None:
             return float('nan')
         return float(prediction.scores[prediction.selected_index])
+
+    def _release_grasp_inference_cache(self):
+        estimator = self.grasp_estimator
+        segmenter = self.sam3_segmenter
+        if estimator is not None:
+            estimator.last_mask = None
+            estimator.last_points = None
+            segmenter = getattr(estimator, 'segmenter', segmenter)
+
+        if segmenter is not None:
+            if hasattr(segmenter, 'last_prediction'):
+                segmenter.last_prediction = None
+            if hasattr(segmenter, 'last_mask'):
+                segmenter.last_mask = None
+
+        gc.collect()
+        self._trim_native_heap()
+
+    @staticmethod
+    def _trim_native_heap():
+        try:
+            import ctypes
+
+            malloc_trim = getattr(ctypes.CDLL('libc.so.6'), 'malloc_trim', None)
+            if malloc_trim is not None:
+                malloc_trim(0)
+        except Exception:
+            pass
 
     def _object_bounds_to_msgs(self, points, source_header):
         pose_msg = PoseStamped()
