@@ -8,7 +8,7 @@
 2. 节点只缓存最新帧，不做实时推理。
 3. client 调用 `/estimate_grasp_pose` service。
 4. 节点默认启动时初始化一次 `SAM3OnnxSegmenter` 和 `GraspPoseEstimator`；如果关闭预加载，则首次 service 调用懒加载一次。
-5. 后续 service 请求复用已加载的 SAM3 ONNX sessions，只执行分割推理，输出一个 object mask。
+5. 后续 service 请求复用已加载并预热的 SAM3 ONNX sessions，将整张输入图 resize 到模型固定输入尺寸后执行分割推理，再把 mask/box 映射到原图坐标。
 6. `GraspPoseEstimator` 用 mask + 深度图 + 相机内参估计抓取位姿。
 7. service 返回 `success/status_code/message/pose/width/...`，client 自己决定下一步状态。
 
@@ -39,6 +39,8 @@
 职责：
 
 - 加载三段式 SAM3 ONNX 模型：`image encoder`、`language encoder`、`decoder`。
+- 将整张输入图按模型输入尺寸推理，并把预测 mask/box 映射到原图坐标。
+- 可在初始化后执行一次空图预热，降低第一次 service 调用延迟。
 - 把输入图像和 prompt 变成分割结果。
 - 输出多个候选 mask、score、box，并选出一个最终对象。
 

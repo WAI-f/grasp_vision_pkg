@@ -16,7 +16,6 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Float32
 
@@ -65,12 +64,6 @@ class CameraSubscriber(Node):
                 ('grasp_pose_topic', '/grasp/pose'),
                 ('grasp_width_topic', '/grasp/width'),
                 ('grasp_debug_image_topic', '/grasp/debug_image'),
-                ('publish_segmented_clouds', True),
-                ('republish_segmented_clouds', True),
-                ('segmented_cloud_republish_rate', 1.0),
-                ('refresh_segmented_cloud_stamp', True),
-                ('object_cloud_topic', '/grasp/object_cloud'),
-                ('background_cloud_topic', '/grasp/background_cloud'),
                 ('segmented_cloud_stride', 2),
                 ('background_mask_dilation_px', 5),
                 ('background_object_bbox_filter', True),
@@ -85,6 +78,7 @@ class CameraSubscriber(Node):
                 ('sam3_provider', 'CUDAExecutionProvider,CPUExecutionProvider'),
                 ('sam3_input_width', 1008),
                 ('sam3_input_height', 1008),
+                ('sam3_warmup', True),
                 ('sam3_score_threshold', 0.0),
                 ('depth_scale', 0.001),
                 ('float_depth_scale', 1.0),
@@ -136,23 +130,6 @@ class CameraSubscriber(Node):
             grasp_debug_image_topic = self.get_parameter(
                 'grasp_debug_image_topic'
             ).value
-            object_cloud_topic = self.get_parameter('object_cloud_topic').value
-            background_cloud_topic = self.get_parameter(
-                'background_cloud_topic'
-            ).value
-            self.publish_segmented_clouds = bool(
-                self.get_parameter('publish_segmented_clouds').value
-            )
-            self.republish_segmented_clouds = bool(
-                self.get_parameter('republish_segmented_clouds').value
-            )
-            self.segmented_cloud_republish_rate = max(
-                0.0,
-                float(self.get_parameter('segmented_cloud_republish_rate').value),
-            )
-            self.refresh_segmented_cloud_stamp = bool(
-                self.get_parameter('refresh_segmented_cloud_stamp').value
-            )
             self.segmented_cloud_stride = max(
                 1, int(self.get_parameter('segmented_cloud_stride').value)
             )
@@ -189,60 +166,23 @@ class CameraSubscriber(Node):
                 grasp_debug_image_topic,
                 queue_size,
             )
-            object_cloud_qos = QoSProfile(depth=queue_size)
-            object_cloud_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-            self.object_cloud_pub = self.create_publisher(
-                PointCloud2,
-                object_cloud_topic,
-                object_cloud_qos,
-            )
-            background_cloud_qos = QoSProfile(depth=queue_size)
-            background_cloud_qos.durability = DurabilityPolicy.VOLATILE
-            self.background_cloud_pub = self.create_publisher(
-                PointCloud2,
-                background_cloud_topic,
-                background_cloud_qos,
-            )
             estimate_grasp_pose_srv = self._load_estimate_grasp_pose_service()
             self.grasp_pose_srv = self.create_service(
                 estimate_grasp_pose_srv,
                 grasp_pose_service,
                 self.estimate_grasp_pose_callback,
             )
-            self.latest_object_cloud_msg = None
-            self.latest_background_cloud_msg = None
-            self.segmented_cloud_republish_timer = None
-            if (
-                self.republish_segmented_clouds
-                and self.segmented_cloud_republish_rate > 0.0
-            ):
-                self.segmented_cloud_republish_timer = self.create_timer(
-                    1.0 / self.segmented_cloud_republish_rate,
-                    self._republish_segmented_clouds,
-                )
             self.get_logger().info(
                 'Grasp pose service enabled with '
                 f'service={grasp_pose_service}, '
                 f'pose_topic={grasp_pose_topic}, '
                 f'width_topic={grasp_width_topic}, '
-                f'debug_image_topic={grasp_debug_image_topic}, '
-                f'object_cloud_topic={object_cloud_topic}, '
-                f'background_cloud_topic={background_cloud_topic}'
+                f'debug_image_topic={grasp_debug_image_topic}'
             )
         else:
             self.grasp_pose_pub = None
             self.grasp_width_pub = None
             self.grasp_debug_image_pub = None
-            self.object_cloud_pub = None
-            self.background_cloud_pub = None
-            self.grasp_pose_srv = None
-            self.publish_segmented_clouds = False
-            self.republish_segmented_clouds = False
-            self.segmented_cloud_republish_rate = 0.0
-            self.refresh_segmented_cloud_stamp = False
-            self.segmented_cloud_republish_timer = None
-            self.latest_object_cloud_msg = None
-            self.latest_background_cloud_msg = None
             self.segmented_cloud_stride = 1
             self.background_mask_dilation_px = 0
             self.background_object_bbox_filter = False
@@ -310,6 +250,7 @@ class CameraSubscriber(Node):
         )
         input_width = int(self.get_parameter('sam3_input_width').value)
         input_height = int(self.get_parameter('sam3_input_height').value)
+        warmup = bool(self.get_parameter('sam3_warmup').value)
         self.get_logger().info(
             'Loading SAM3 ONNX models once from '
             f'{model_dir} with providers={providers}'
@@ -322,6 +263,7 @@ class CameraSubscriber(Node):
             score_threshold=float(
                 self.get_parameter('sam3_score_threshold').value
             ),
+            warmup=warmup,
         )
         self.get_logger().info('SAM3 ONNX models loaded and cached for reuse.')
         return segmenter
@@ -522,13 +464,27 @@ class CameraSubscriber(Node):
         response.mask_pixel_count = self._last_mask_pixel_count()
         response.segmentation_score = self._last_segmentation_score()
 
-        if self._should_publish_segmented_clouds(request):
-            self._publish_segmented_clouds(
-                color_frame,
-                depth_frame,
-                camera_matrix,
-                source_header,
-            )
+        object_cloud = None
+        background_cloud = None
+        if self.grasp_estimator.last_mask is not None:
+            try:
+                object_cloud, background_cloud = self._make_segmented_clouds(
+                    color_frame,
+                    depth_frame,
+                    camera_matrix,
+                    self.grasp_estimator.last_mask,
+                    source_header,
+                )
+                response.object_cloud = deepcopy(object_cloud)
+                response.background_cloud = deepcopy(background_cloud)
+                response.has_segmented_clouds = True
+            except Exception as exc:
+                response.has_segmented_clouds = False
+                self.get_logger().warn(
+                    f'Failed to build segmented point clouds for response: {exc}'
+                )
+        else:
+            response.has_segmented_clouds = False
 
         if bool(request.publish_result) or self.publish_grasp_result:
             self._publish_grasp_pose_msg(response.pose)
@@ -628,39 +584,6 @@ class CameraSubscriber(Node):
         dimensions.y = float(size[1])
         dimensions.z = float(size[2])
         return pose_msg, dimensions
-
-    def _should_publish_segmented_clouds(self, request):
-        return (
-            (self.publish_segmented_clouds or bool(request.publish_result))
-            and self.object_cloud_pub is not None
-            and self.background_cloud_pub is not None
-        )
-
-    def _publish_segmented_clouds(
-        self,
-        color_frame,
-        depth_frame,
-        camera_matrix,
-        source_header,
-    ):
-        if self.grasp_estimator is None or self.grasp_estimator.last_mask is None:
-            return
-        object_cloud, background_cloud = self._make_segmented_clouds(
-            color_frame,
-            depth_frame,
-            camera_matrix,
-            self.grasp_estimator.last_mask,
-            source_header,
-        )
-        self.latest_object_cloud_msg = deepcopy(object_cloud)
-        self.latest_background_cloud_msg = deepcopy(background_cloud)
-        self.object_cloud_pub.publish(object_cloud)
-        self.background_cloud_pub.publish(background_cloud)
-        self.get_logger().info(
-            'Published segmented point clouds: '
-            f'object_points={object_cloud.width}, '
-            f'background_points={background_cloud.width}'
-        )
 
     def _make_segmented_clouds(
         self,
@@ -848,28 +771,6 @@ class CameraSubscriber(Node):
         msg.row_step = msg.point_step * msg.width
         msg.data = cloud.tobytes()
         return msg
-
-    def _republish_segmented_clouds(self):
-        if (
-            self.latest_object_cloud_msg is None
-            or self.latest_background_cloud_msg is None
-            or self.object_cloud_pub is None
-            or self.background_cloud_pub is None
-        ):
-            return
-
-        object_cloud = deepcopy(self.latest_object_cloud_msg)
-        background_cloud = deepcopy(self.latest_background_cloud_msg)
-        if self.refresh_segmented_cloud_stamp:
-            # A zero stamp asks tf2 consumers to use the latest available
-            # transform. This keeps MoveIt OctoMap from dropping these debug
-            # clouds when image stamps fall outside the TF cache.
-            object_cloud.header.stamp.sec = 0
-            object_cloud.header.stamp.nanosec = 0
-            background_cloud.header.stamp.sec = 0
-            background_cloud.header.stamp.nanosec = 0
-        self.object_cloud_pub.publish(object_cloud)
-        self.background_cloud_pub.publish(background_cloud)
 
     def _publish_grasp_pose_msg(self, msg):
         if self.grasp_pose_pub is not None:

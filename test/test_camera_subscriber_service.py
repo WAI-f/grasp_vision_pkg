@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from grasp_vision_pkg.camera_subscriber import CameraSubscriber
 from grasp_vision_pkg.grasp_pose_estimator import GraspPose
 import numpy as np
+from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Header
 
 
@@ -34,6 +35,9 @@ class _Response:
         self.pose = None
         self.object_pose = None
         self.object_dimensions = SimpleNamespace(x=0.0, y=0.0, z=0.0)
+        self.object_cloud = PointCloud2()
+        self.background_cloud = PointCloud2()
+        self.has_segmented_clouds = False
         self.width = 0.0
         self.score = 0.0
         self.point_count = 0
@@ -47,6 +51,8 @@ class _Estimator:
 
     def __init__(self, pose):
         self.pose = pose
+        self.min_depth = 0.05
+        self.max_depth = 3.0
         self.last_mask = np.array([[True, False], [True, True]])
         self.last_points = np.array([
             [0.08, 0.18, 0.28],
@@ -62,6 +68,12 @@ class _Estimator:
 
     def estimate(self, **_kwargs):
         return self.pose
+
+    def _normalize_camera_matrix(self, matrix):
+        return np.asarray(matrix, dtype=np.float64)
+
+    def _depth_to_meters(self, depth):
+        return np.asarray(depth, dtype=np.float32)
 
 
 def _request(**overrides):
@@ -92,9 +104,6 @@ def _node_without_ros():
     node.grasp_estimator_lock = nullcontext()
     node.publish_grasp_result = False
     node.save_grasp_debug_image = False
-    node.publish_segmented_clouds = False
-    node.object_cloud_pub = None
-    node.background_cloud_pub = None
     node.segmented_cloud_stride = 1
     node.background_mask_dilation_px = 0
     node.background_object_bbox_filter = False
@@ -164,6 +173,11 @@ def test_estimate_grasp_pose_success_response_contains_status_details():
     assert response.point_count == 42
     assert response.mask_pixel_count == 3
     assert response.segmentation_score == 0.87
+    assert response.has_segmented_clouds
+    assert response.object_cloud.header.frame_id == 'camera_color'
+    assert response.object_cloud.width == 3
+    assert response.background_cloud.header.frame_id == 'camera_color'
+    assert response.background_cloud.width == 1
 
 
 def test_ensure_sam3_segmenter_reuses_cached_instance():

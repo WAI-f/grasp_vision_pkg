@@ -33,19 +33,12 @@ camera_subscriber:
     grasp_pose_topic: /grasp/pose
     grasp_width_topic: /grasp/width
     grasp_debug_image_topic: /grasp/debug_image
-    publish_segmented_clouds: true
-    republish_segmented_clouds: true
-    segmented_cloud_republish_rate: 1.0
-    # true sets republished cloud stamp to 0 so TF consumers use latest transform.
-    refresh_segmented_cloud_stamp: true
-    object_cloud_topic: /grasp/object_cloud
-    background_cloud_topic: /grasp/background_cloud
     segmented_cloud_stride: 2
-    background_mask_dilation_px: 2
+    background_mask_dilation_px: 3
     # Remove the target object's padded 3D volume from background_cloud so
     # MoveIt OctoMap does not duplicate the grasped object as environment.
     background_object_bbox_filter: true
-    background_object_bbox_padding_xy: 0.02
+    background_object_bbox_padding_xy: 0.04
     background_object_bbox_padding_z: 0.02
     min_object_dimension: 0.01
     grasp_frame_id: ''
@@ -53,11 +46,13 @@ camera_subscriber:
     # Empty sam3_model_dir resolves to share/grasp_vision_pkg/models/sam3.
     sam3_model_dir: ''
     sam3_prompt_type: text
-    sam3_prompt: visual
+    sam3_prompt: banana
     sam3_box_prompt: [0.0, 0.0, 0.0, 0.0]
     sam3_provider: CUDAExecutionProvider,CPUExecutionProvider
     sam3_input_width: 1008
     sam3_input_height: 1008
+    # Run one dummy inference during model initialization to hide first-call latency.
+    sam3_warmup: true
     sam3_score_threshold: 0.0
 
     # GraspPoseEstimator parameters

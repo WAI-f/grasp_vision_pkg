@@ -20,10 +20,6 @@ def generate_launch_description():
             description='Path to the camera subscriber parameter file.',
         ),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
-        DeclareLaunchArgument('preload_grasp_estimator', default_value='true'),
-        DeclareLaunchArgument('background_object_bbox_filter', default_value='true'),
-        DeclareLaunchArgument('background_object_bbox_padding_xy', default_value='0.06'),
-        DeclareLaunchArgument('background_object_bbox_padding_z', default_value='0.04'),
         Node(
             package='grasp_vision_pkg',
             executable='camera_subscriber',
@@ -35,22 +31,6 @@ def generate_launch_description():
                     'use_sim_time': ParameterValue(
                         LaunchConfiguration('use_sim_time'),
                         value_type=bool,
-                    ),
-                    'preload_grasp_estimator': ParameterValue(
-                        LaunchConfiguration('preload_grasp_estimator'),
-                        value_type=bool,
-                    ),
-                    'background_object_bbox_filter': ParameterValue(
-                        LaunchConfiguration('background_object_bbox_filter'),
-                        value_type=bool,
-                    ),
-                    'background_object_bbox_padding_xy': ParameterValue(
-                        LaunchConfiguration('background_object_bbox_padding_xy'),
-                        value_type=float,
-                    ),
-                    'background_object_bbox_padding_z': ParameterValue(
-                        LaunchConfiguration('background_object_bbox_padding_z'),
-                        value_type=float,
                     ),
                 },
             ],

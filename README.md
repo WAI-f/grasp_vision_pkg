@@ -35,7 +35,7 @@
   - 订阅 RGB、aligned depth、camera info。
   - 缓存最新 RGB-D 帧和相机内参。
   - 提供 `/estimate_grasp_pose` service。
-  - 默认启动时初始化一次 SAM3 ONNX segmenter 和 `GraspPoseEstimator`，后续 service 请求复用模型会话只做推理。
+  - 默认启动时初始化并预热一次 SAM3 ONNX segmenter 和 `GraspPoseEstimator`，后续 service 请求复用模型会话只做推理。
   - 可选发布抓取位姿、夹爪宽度、debug overlay 图像。
 
 - `sam3_onnx_segmenter.py`
@@ -139,6 +139,8 @@ ros2 launch grasp_vision_pkg camera_subscriber.launch.py \
   config_file:=/root/ros2_proj/moveit_example/grasp_vision_pkg/config/config.yaml
 ```
 
+除 `use_sim_time` 外，算法和识别参数默认只从 `config_file` 指向的 YAML 读取，避免 launch 默认值覆盖配置文件。
+
 直接运行节点：
 
 ```bash
@@ -198,6 +200,8 @@ message='Waiting for color image, aligned depth image, and camera info.'
 | `sam3_prompt` | `visual` | 默认 text prompt。 |
 | `sam3_box_prompt` | `[0.0, 0.0, 0.0, 0.0]` | 默认 box prompt。 |
 | `sam3_provider` | `CUDAExecutionProvider,CPUExecutionProvider` | ONNX Runtime provider 优先级。 |
+| `sam3_input_width` / `sam3_input_height` | `1008` / `1008` | SAM3 ONNX image encoder 输入尺寸；若配置和模型固定输入不一致，运行时会自动以模型输入尺寸为准。 |
+| `sam3_warmup` | `true` | 模型初始化后立即跑一次空图预热，降低第一次 service 调用延迟。 |
 | `min_depth` / `max_depth` | `0.05` / `3.0` | 有效深度范围，单位 m。 |
 | `min_points` | `80` | 位姿估计所需最小有效点数量。 |
 | `grasp_width_margin` | `0.02` | 夹爪宽度安全余量，单位 m。 |

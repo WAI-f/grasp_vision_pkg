@@ -40,6 +40,7 @@ class SAM3OnnxSegmenter:
         input_color_space: str = 'bgr',
         input_size: tuple[int, int] = (1008, 1008),
         score_threshold: float = 0.0,
+        warmup: bool = False,
     ):
         self.model_dir = Path(model_dir).expanduser()
         self.input_color_space = input_color_space.lower().strip()
@@ -73,6 +74,31 @@ class SAM3OnnxSegmenter:
             str(self.decoder_path),
             providers=self.providers,
         )
+        self._sync_input_size_with_model()
+
+        if warmup:
+            self.warmup()
+
+    def warmup(self) -> None:
+        warmup_image = np.zeros(
+            (self.input_size[1], self.input_size[0], 3),
+            dtype=np.uint8,
+        )
+        try:
+            vision_pos_enc, backbone_fpn = self._encode_image(warmup_image)
+            language_mask, language_features = self._encode_language('visual')
+            self._decode(
+                backbone_fpn=backbone_fpn,
+                vision_pos_enc_2=vision_pos_enc[2],
+                language_mask=language_mask,
+                language_features=language_features,
+                box_prompt=None,
+            )
+        except Exception as exc:
+            raise RuntimeError(f'SAM3 warmup inference failed: {exc}') from exc
+        finally:
+            self.last_prediction = None
+            self.last_mask = None
 
     def predict(self, image: np.ndarray, prompt: Any = None) -> SAM3Prediction:
         """Return SAM3 masks, scores and boxes for a prompt.
@@ -177,6 +203,33 @@ class SAM3OnnxSegmenter:
             raise FileNotFoundError(
                 'SAM3 ONNX model files are missing: ' + ', '.join(missing)
             )
+
+    def _sync_input_size_with_model(self) -> None:
+        inputs = self.sess_image.get_inputs()
+        if not inputs:
+            return
+
+        shape = list(inputs[0].shape)
+        width = None
+        height = None
+        if len(shape) >= 3:
+            maybe_height = shape[-2]
+            maybe_width = shape[-1]
+            if isinstance(maybe_height, int) and isinstance(maybe_width, int):
+                height = int(maybe_height)
+                width = int(maybe_width)
+
+        if width is None or height is None:
+            return
+
+        model_input_size = (width, height)
+        if self.input_size != model_input_size:
+            print(
+                'SAM3 input_size overridden from '
+                f'{self.input_size} to {model_input_size} to match '
+                f'{self.image_encoder_path.name} input shape {shape}'
+            )
+            self.input_size = model_input_size
 
     def _resolve_providers(self, providers: Sequence[str] | None) -> list[str]:
         available = list(self._onnxruntime.get_available_providers())
