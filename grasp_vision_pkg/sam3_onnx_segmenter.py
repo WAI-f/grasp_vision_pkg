@@ -30,6 +30,16 @@ class SAM3Prediction:
     selected_index: int
 
 
+@dataclass(frozen=True)
+class _CropMeta:
+    original_width: int
+    original_height: int
+    crop_x: int
+    crop_y: int
+    crop_width: int
+    crop_height: int
+
+
 class SAM3OnnxSegmenter:
     """SAM3 object segmenter backed by the exported ONNX models."""
 
@@ -38,7 +48,8 @@ class SAM3OnnxSegmenter:
         model_dir: str | Path,
         providers: Sequence[str] | None = None,
         input_color_space: str = 'bgr',
-        input_size: tuple[int, int] = (1008, 1008),
+        input_size: tuple[int, int] = (672, 672),
+        crop_mode: str = 'center_square',
         score_threshold: float = 0.0,
         warmup: bool = False,
     ):
@@ -48,6 +59,9 @@ class SAM3OnnxSegmenter:
             raise ValueError("input_color_space must be 'bgr' or 'rgb'")
 
         self.input_size = (int(input_size[0]), int(input_size[1]))
+        self.crop_mode = crop_mode.lower().strip()
+        if self.crop_mode not in {'center_square', 'none'}:
+            raise ValueError("crop_mode must be 'center_square' or 'none'")
         self.score_threshold = float(score_threshold)
         self.last_prediction: SAM3Prediction | None = None
         self.last_mask: np.ndarray | None = None
@@ -85,7 +99,7 @@ class SAM3OnnxSegmenter:
             dtype=np.uint8,
         )
         try:
-            vision_pos_enc, backbone_fpn = self._encode_image(warmup_image)
+            vision_pos_enc, backbone_fpn, _ = self._encode_image(warmup_image)
             language_mask, language_features = self._encode_language('visual')
             self._decode(
                 backbone_fpn=backbone_fpn,
@@ -111,7 +125,9 @@ class SAM3OnnxSegmenter:
         bgr_image = self._normalize_display_image(image)
         text_prompt, box_prompt = self._normalize_prompt(prompt)
 
-        vision_pos_enc, backbone_fpn = self._encode_image(bgr_image)
+        vision_pos_enc, backbone_fpn, crop_meta = self._encode_image(bgr_image)
+        if box_prompt is not None:
+            box_prompt = self._remap_box_prompt_to_crop(box_prompt, crop_meta)
         language_mask, language_features = self._encode_language(text_prompt)
         boxes, scores, masks = self._decode(
             backbone_fpn=backbone_fpn,
@@ -125,6 +141,7 @@ class SAM3OnnxSegmenter:
             masks=masks,
             image_width=bgr_image.shape[1],
             image_height=bgr_image.shape[0],
+            crop_meta=crop_meta,
         )
 
         scores = np.asarray(scores).reshape(-1)
@@ -335,8 +352,71 @@ class SAM3OnnxSegmenter:
             return cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
         return array.copy()
 
+    def _make_crop_meta(self, bgr_image: np.ndarray) -> _CropMeta:
+        image_height, image_width = bgr_image.shape[:2]
+        if self.crop_mode == 'none':
+            return _CropMeta(
+                original_width=image_width,
+                original_height=image_height,
+                crop_x=0,
+                crop_y=0,
+                crop_width=image_width,
+                crop_height=image_height,
+            )
+
+        crop_size = min(image_width, image_height)
+        crop_x = max(0, (image_width - crop_size) // 2)
+        crop_y = max(0, (image_height - crop_size) // 2)
+        return _CropMeta(
+            original_width=image_width,
+            original_height=image_height,
+            crop_x=crop_x,
+            crop_y=crop_y,
+            crop_width=crop_size,
+            crop_height=crop_size,
+        )
+
+    def _crop_image(self, bgr_image: np.ndarray, crop_meta: _CropMeta) -> np.ndarray:
+        y1 = crop_meta.crop_y
+        y2 = crop_meta.crop_y + crop_meta.crop_height
+        x1 = crop_meta.crop_x
+        x2 = crop_meta.crop_x + crop_meta.crop_width
+        return bgr_image[y1:y2, x1:x2]
+
+    def _remap_box_prompt_to_crop(
+        self,
+        box_prompt: list[float],
+        crop_meta: _CropMeta,
+    ) -> list[float]:
+        cx, cy, width, height = [float(value) for value in box_prompt]
+        abs_cx = cx * crop_meta.original_width
+        abs_cy = cy * crop_meta.original_height
+        abs_width = width * crop_meta.original_width
+        abs_height = height * crop_meta.original_height
+
+        x1 = abs_cx - abs_width / 2.0
+        y1 = abs_cy - abs_height / 2.0
+        x2 = abs_cx + abs_width / 2.0
+        y2 = abs_cy + abs_height / 2.0
+
+        crop_x1 = np.clip(x1 - crop_meta.crop_x, 0.0, crop_meta.crop_width)
+        crop_y1 = np.clip(y1 - crop_meta.crop_y, 0.0, crop_meta.crop_height)
+        crop_x2 = np.clip(x2 - crop_meta.crop_x, 0.0, crop_meta.crop_width)
+        crop_y2 = np.clip(y2 - crop_meta.crop_y, 0.0, crop_meta.crop_height)
+
+        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+            raise ValueError('box prompt does not overlap the SAM3 crop region')
+
+        crop_cx = ((crop_x1 + crop_x2) / 2.0) / crop_meta.crop_width
+        crop_cy = ((crop_y1 + crop_y2) / 2.0) / crop_meta.crop_height
+        crop_width = (crop_x2 - crop_x1) / crop_meta.crop_width
+        crop_height = (crop_y2 - crop_y1) / crop_meta.crop_height
+        return [float(crop_cx), float(crop_cy), float(crop_width), float(crop_height)]
+
     def _encode_image(self, bgr_image: np.ndarray):
-        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        crop_meta = self._make_crop_meta(bgr_image)
+        cropped = self._crop_image(bgr_image, crop_meta)
+        rgb_image = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
         resized = cv2.resize(rgb_image, self.input_size, interpolation=cv2.INTER_LINEAR)
         image_tensor = np.ascontiguousarray(resized.transpose(2, 0, 1), dtype=np.uint8)
         output = self.sess_image.run(None, {'image': image_tensor})
@@ -344,7 +424,7 @@ class SAM3OnnxSegmenter:
             raise ValueError(f'image encoder returned {len(output)} outputs, expected 6')
         vision_pos_enc = list(output[:3])
         backbone_fpn = list(output[3:])
-        return vision_pos_enc, backbone_fpn
+        return vision_pos_enc, backbone_fpn, crop_meta
 
     def _encode_language(self, text_prompt: str):
         tokens = self._tokenize(texts=[text_prompt], context_length=32)
@@ -402,24 +482,53 @@ class SAM3OnnxSegmenter:
         masks: np.ndarray,
         image_width: int,
         image_height: int,
+        crop_meta: _CropMeta | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        boxes = boxes * np.array(
-            [image_width, image_height, image_width, image_height],
+        if crop_meta is None:
+            crop_meta = _CropMeta(
+                original_width=image_width,
+                original_height=image_height,
+                crop_x=0,
+                crop_y=0,
+                crop_width=image_width,
+                crop_height=image_height,
+            )
+
+        boxes = np.asarray(boxes, dtype=np.float32) * np.array(
+            [
+                crop_meta.crop_width,
+                crop_meta.crop_height,
+                crop_meta.crop_width,
+                crop_meta.crop_height,
+            ],
             dtype=np.float32,
         )
+        boxes = boxes + np.array(
+            [crop_meta.crop_x, crop_meta.crop_y, crop_meta.crop_x, crop_meta.crop_y],
+            dtype=np.float32,
+        )
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0.0, image_width)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0.0, image_height)
+
         if len(masks) == 0:
             return boxes, np.empty((0, image_height, image_width), dtype=bool)
-        masks = np.array(
-            [
-                cv2.resize(
-                    mask[0],
-                    dsize=(image_width, image_height),
-                    interpolation=cv2.INTER_LINEAR,
-                ) > 0.5
-                for mask in masks
-            ]
-        )
-        return boxes, masks
+
+        restored_masks = []
+        for mask in masks:
+            crop_mask = cv2.resize(
+                mask[0],
+                dsize=(crop_meta.crop_width, crop_meta.crop_height),
+                interpolation=cv2.INTER_LINEAR,
+            ) > 0.5
+            full_mask = np.zeros((image_height, image_width), dtype=bool)
+            y1 = crop_meta.crop_y
+            y2 = crop_meta.crop_y + crop_meta.crop_height
+            x1 = crop_meta.crop_x
+            x2 = crop_meta.crop_x + crop_meta.crop_width
+            full_mask[y1:y2, x1:x2] = crop_mask
+            restored_masks.append(full_mask)
+
+        return boxes, np.array(restored_masks, dtype=bool)
 
     def _select_index(self, scores: np.ndarray) -> int:
         if scores.size == 0:
@@ -566,6 +675,12 @@ def parse_args() -> argparse.Namespace:
         help='Minimum score to prefer when selecting the final mask.',
     )
     parser.add_argument(
+        '--crop-mode',
+        choices=['center_square', 'none'],
+        default='center_square',
+        help='Image crop mode before resizing to the SAM3 input size.',
+    )
+    parser.add_argument(
         '--output',
         type=Path,
         default=Path('sam3_overlay.png'),
@@ -596,6 +711,7 @@ def main() -> None:
         model_dir=args.model_dir,
         providers=providers,
         input_color_space='bgr',
+        crop_mode=args.crop_mode,
         score_threshold=args.score_threshold,
     )
 

@@ -49,8 +49,9 @@ camera_subscriber:
     sam3_prompt: banana
     sam3_box_prompt: [0.0, 0.0, 0.0, 0.0]
     sam3_provider: CUDAExecutionProvider,CPUExecutionProvider
-    sam3_input_width: 1008
-    sam3_input_height: 1008
+    sam3_input_width: 672
+    sam3_input_height: 672
+    sam3_crop_mode: center_square
     # Run one dummy inference during model initialization to hide first-call latency.
     sam3_warmup: true
     sam3_score_threshold: 0.0

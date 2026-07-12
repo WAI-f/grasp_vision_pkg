@@ -200,7 +200,8 @@ message='Waiting for color image, aligned depth image, and camera info.'
 | `sam3_prompt` | `visual` | 默认 text prompt。 |
 | `sam3_box_prompt` | `[0.0, 0.0, 0.0, 0.0]` | 默认 box prompt。 |
 | `sam3_provider` | `CUDAExecutionProvider,CPUExecutionProvider` | ONNX Runtime provider 优先级。 |
-| `sam3_input_width` / `sam3_input_height` | `1008` / `1008` | SAM3 ONNX image encoder 输入尺寸；若配置和模型固定输入不一致，运行时会自动以模型输入尺寸为准。 |
+| `sam3_input_width` / `sam3_input_height` | `672` / `672` | SAM3 ONNX image encoder 输入尺寸；若配置和模型固定输入不一致，运行时会自动以模型输入尺寸为准。 |
+| `sam3_crop_mode` | `center_square` | 推理前裁剪模式；默认中心正方形裁剪，并在后处理中把 mask/box 映射回原图坐标。 |
 | `sam3_warmup` | `true` | 模型初始化后立即跑一次空图预热，降低第一次 service 调用延迟。 |
 | `min_depth` / `max_depth` | `0.05` / `3.0` | 有效深度范围，单位 m。 |
 | `min_points` | `80` | 位姿估计所需最小有效点数量。 |

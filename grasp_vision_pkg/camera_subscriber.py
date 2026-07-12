@@ -77,8 +77,9 @@ class CameraSubscriber(Node):
                 ('sam3_prompt', 'visual'),
                 ('sam3_box_prompt', [0.0, 0.0, 0.0, 0.0]),
                 ('sam3_provider', 'CUDAExecutionProvider,CPUExecutionProvider'),
-                ('sam3_input_width', 1008),
-                ('sam3_input_height', 1008),
+                ('sam3_input_width', 672),
+                ('sam3_input_height', 672),
+                ('sam3_crop_mode', 'center_square'),
                 ('sam3_warmup', True),
                 ('sam3_score_threshold', 0.0),
                 ('depth_scale', 0.001),
@@ -251,6 +252,7 @@ class CameraSubscriber(Node):
         )
         input_width = int(self.get_parameter('sam3_input_width').value)
         input_height = int(self.get_parameter('sam3_input_height').value)
+        crop_mode = str(self.get_parameter('sam3_crop_mode').value)
         warmup = bool(self.get_parameter('sam3_warmup').value)
         self.get_logger().info(
             'Loading SAM3 ONNX models once from '
@@ -261,6 +263,7 @@ class CameraSubscriber(Node):
             providers=providers,
             input_color_space='bgr',
             input_size=(input_width, input_height),
+            crop_mode=crop_mode,
             score_threshold=float(
                 self.get_parameter('sam3_score_threshold').value
             ),
